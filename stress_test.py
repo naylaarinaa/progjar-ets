@@ -4,7 +4,6 @@ import subprocess
 import csv
 from itertools import product
 
-# --- FileClient dan fungsinya ---
 class FileClient:
     def __init__(self, server_address='localhost:6666'):
         host, port = server_address.split(':') if isinstance(server_address, str) else server_address
@@ -47,19 +46,19 @@ def generate_test_file(filename, size_mb):
     return filename
 
 def upload_worker(client, size_mb, wid):
-    src_file = f"file{size_mb}mb.bin"    # ubah di sini
+    src_file = f"file{size_mb}mb.bin"
     generate_test_file(src_file, size_mb)
     with open(src_file, 'rb') as f:
         data = f.read()
     start = time.time()
-    res = client.remote_upload(f"testfile_{size_mb}mb.dat", data)
+    res = client.remote_upload(src_file, data)
     client.remote_list()
     return {'success': res.get('status') == 'OK', 'time': time.time() - start, 'bytes': len(data), 'worker_id': wid}
 
 def download_worker(client, size_mb, wid):
     filename = f"file{size_mb}mb.bin"
     start = time.time()
-    data = client.remote_get(f"testfile_{size_mb}mb.dat")
+    data = client.remote_get(filename)
     if data:
         with open(filename, 'wb') as f:
             f.write(data)
@@ -85,7 +84,6 @@ def run_test(server, op, size_mb, workers, use_proc_pool=False):
     return {'operation': op, 'file_size_mb': size_mb, 'client_workers': workers, 'successful': success,
             'failed': fail, 'total_time': max_time, 'throughput': throughput, 'total_bytes': total_bytes}
 
-# --- Fungsi server dan client testing gabungan ---
 def start_server(server_type, workers):
     script = 'file_server_tp.py' if server_type == 'thread' else 'file_server_pp.py'
     return subprocess.Popen(['python3', script, str(workers)])
@@ -138,19 +136,13 @@ def main():
 
     csv_filename = 'stress_test_results.csv'
 
-    # Jika dijalankan dengan parameter langsung (bukan batch)
     if args.operation and args.file_size and args.workers:
         result = run_test(args.server, args.operation, args.file_size, args.workers, args.use_process_pool)
         print(json.dumps(result, indent=2))
         return
 
-    # Urutan pengujian: per volume → upload semua → download semua
-    test_matrix = []
-    for size in [10, 50, 100]:
-        for op in ['upload', 'download']:
-            for cw in [1, 5, 50]:
-                test_matrix.append((op, size, cw))
-
+    # SELANG SELING PER VOLUME
+    test_matrix = [(op, size, cw) for size in [10, 50, 100] for op in ['upload', 'download'] for cw in [1, 5, 50]]
     server_types = ['thread', 'process']
     server_workers = [1, 5, 50]
 
@@ -183,11 +175,8 @@ def main():
                 print(f"Server Worker Count : {s_workers}")
                 print("="*60)
 
-                # Kill server sebelumnya
                 subprocess.run(['pkill', '-f', 'file_server'], stderr=subprocess.DEVNULL)
                 time.sleep(1)
-
-                # Start server baru
                 server_proc = start_server(s_type, s_workers)
                 time.sleep(2)
 
