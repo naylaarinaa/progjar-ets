@@ -4,6 +4,7 @@ import subprocess
 import csv
 from itertools import product
 
+# --- FileClient dan fungsinya ---
 class FileClient:
     def __init__(self, server_address='localhost:6666'):
         host, port = server_address.split(':') if isinstance(server_address, str) else server_address
@@ -46,19 +47,19 @@ def generate_test_file(filename, size_mb):
     return filename
 
 def upload_worker(client, size_mb, wid):
-    src_file = f"file{size_mb}mb.bin"
+    src_file = f"file{size_mb}mb.bin"    # ubah di sini
     generate_test_file(src_file, size_mb)
     with open(src_file, 'rb') as f:
         data = f.read()
     start = time.time()
-    res = client.remote_upload(src_file, data)
+    res = client.remote_upload(f"file{size_mb}mb.bin", data)
     client.remote_list()
     return {'success': res.get('status') == 'OK', 'time': time.time() - start, 'bytes': len(data), 'worker_id': wid}
 
 def download_worker(client, size_mb, wid):
     filename = f"file{size_mb}mb.bin"
     start = time.time()
-    data = client.remote_get(filename)
+    data = client.remote_get(f"file{size_mb}mb.bin")
     if data:
         with open(filename, 'wb') as f:
             f.write(data)
@@ -84,6 +85,7 @@ def run_test(server, op, size_mb, workers, use_proc_pool=False):
     return {'operation': op, 'file_size_mb': size_mb, 'client_workers': workers, 'successful': success,
             'failed': fail, 'total_time': max_time, 'throughput': throughput, 'total_bytes': total_bytes}
 
+# --- Fungsi server dan client testing gabungan ---
 def start_server(server_type, workers):
     script = 'file_server_tp.py' if server_type == 'thread' else 'file_server_pp.py'
     return subprocess.Popen(['python3', script, str(workers)])
@@ -141,10 +143,15 @@ def main():
         print(json.dumps(result, indent=2))
         return
 
-    # SELANG SELING PER VOLUME
-    test_matrix = [(op, size, cw) for size in [10, 50, 100] for op in ['upload', 'download'] for cw in [1, 5, 50]]
+    # Modified test matrix to alternate between upload and download for each file size
+    test_matrix = []
+    for size in [10, 50, 100]:
+        test_matrix.append(('upload', size))
+        test_matrix.append(('download', size))
+    
     server_types = ['thread', 'process']
     server_workers = [1, 5, 50]
+    client_workers = [1, 5, 50]
 
     last_completed_id = get_last_completed_test_id(csv_filename)
 
@@ -159,74 +166,75 @@ def main():
             writer.writeheader()
 
         test_id = 1
-        for operation, file_size, c_workers in test_matrix:
-            for s_type, s_workers in product(server_types, server_workers):
-                if test_id <= last_completed_id:
-                    print(f"Skipping test {test_id} (already completed)")
-                    test_id += 1
-                    continue
+        for operation, file_size in test_matrix:
+            for c_workers in client_workers:
+                for s_type, s_workers in product(server_types, server_workers):
+                    if test_id <= last_completed_id:
+                        print(f"Skipping test {test_id} (already completed)")
+                        test_id += 1
+                        continue
 
-                print("\n" + "="*60)
-                print(f"Running Test #{test_id}")
-                print(f"Operation           : {operation.capitalize()}")
-                print(f"File Size           : {file_size} MB")
-                print(f"Client Workers      : {c_workers}")
-                print(f"Server Type         : {s_type.capitalize()} Server")
-                print(f"Server Worker Count : {s_workers}")
-                print("="*60)
+                    print("\n" + "="*60)
+                    print(f"Running Test #{test_id}")
+                    print(f"Operation           : {operation.capitalize()}")
+                    print(f"File Size           : {file_size} MB")
+                    print(f"Client Workers      : {c_workers}")
+                    print(f"Server Type         : {s_type.capitalize()} Server")
+                    print(f"Server Worker Count : {s_workers}")
+                    print("="*60)
 
-                subprocess.run(['pkill', '-f', 'file_server'], stderr=subprocess.DEVNULL)
-                time.sleep(1)
-                server_proc = start_server(s_type, s_workers)
-                time.sleep(2)
+                    subprocess.run(['pkill', '-f', 'file_server'], stderr=subprocess.DEVNULL)
+                    time.sleep(1)
+                    server_proc = start_server(s_type, s_workers)
+                    time.sleep(2)
 
-                try:
-                    result = run_client_test(operation, 'localhost:6666', file_size, c_workers, False)
-                    if not result:
+                    try:
+                        result = run_client_test(operation, 'localhost:6666', file_size, c_workers, False)
+                        if not result:
+                            writer.writerow({
+                                'Nomor': test_id,
+                                'Operasi': operation,
+                                'Volume': file_size,
+                                'Jumlah client worker pool': c_workers,
+                                'Jumlah server worker pool': s_workers,
+                                'Jumlah worker client sukses': 0,
+                                'Jumlah worker client gagal': c_workers,
+                                'Tipe server': s_type,
+                                'Status server': 'crash',
+                                'Waktu total per client': '',
+                                'Throughput per client': ''
+                            })
+                            csvfile.flush()
+                            print("Result: Test failed or no response from client.")
+                            test_id += 1
+                            continue
+
+                        server_status = 'sukses' if server_proc.poll() is None else 'crash'
+
                         writer.writerow({
                             'Nomor': test_id,
                             'Operasi': operation,
                             'Volume': file_size,
                             'Jumlah client worker pool': c_workers,
                             'Jumlah server worker pool': s_workers,
-                            'Jumlah worker client sukses': 0,
-                            'Jumlah worker client gagal': c_workers,
+                            'Waktu total per client': result['total_time'],
+                            'Throughput per client': result['throughput'],
+                            'Jumlah worker client sukses': result['successful'],
+                            'Jumlah worker client gagal': result['failed'],
                             'Tipe server': s_type,
-                            'Status server': 'crash',
-                            'Waktu total per client': '',
-                            'Throughput per client': ''
+                            'Status server': server_status,
                         })
                         csvfile.flush()
-                        print("Result: Test failed or no response from client.")
+
+                        print(f"Result: Client Success={result['successful']} | Client Fail={result['failed']} | Server Status={server_status}")
+                        print(f"Total Time          : {result['total_time']:.3f} sec")
+                        print(f"Throughput          : {result['throughput'] / (1024*1024):.3f} MB/s")
+
                         test_id += 1
-                        continue
-
-                    server_status = 'sukses' if server_proc.poll() is None else 'crash'
-
-                    writer.writerow({
-                        'Nomor': test_id,
-                        'Operasi': operation,
-                        'Volume': file_size,
-                        'Jumlah client worker pool': c_workers,
-                        'Jumlah server worker pool': s_workers,
-                        'Waktu total per client': result['total_time'],
-                        'Throughput per client': result['throughput'],
-                        'Jumlah worker client sukses': result['successful'],
-                        'Jumlah worker client gagal': result['failed'],
-                        'Tipe server': s_type,
-                        'Status server': server_status,
-                    })
-                    csvfile.flush()
-
-                    print(f"Result: Client Success={result['successful']} | Client Fail={result['failed']} | Server Status={server_status}")
-                    print(f"Total Time          : {result['total_time']:.3f} sec")
-                    print(f"Throughput          : {result['throughput'] / (1024*1024):.3f} MB/s")
-
-                    test_id += 1
-                finally:
-                    server_proc.terminate()
-                    server_proc.wait()
-                    time.sleep(1)
+                    finally:
+                        server_proc.terminate()
+                        server_proc.wait()
+                        time.sleep(1)
 
 if __name__ == '__main__':
     main()
