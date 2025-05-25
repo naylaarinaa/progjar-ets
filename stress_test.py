@@ -57,9 +57,18 @@ def upload_worker(client, size_mb, wid):
     return {'success': res.get('status') == 'OK', 'time': time.time() - start, 'bytes': len(data), 'worker_id': wid}
 
 def download_worker(client, size_mb, wid):
+    filename = f"file{size_mb}mb.bin"
     start = time.time()
     data = client.remote_get(f"testfile_{size_mb}mb.dat")
-    return {'success': data is not None, 'time': time.time() - start, 'bytes': len(data) if data else 0, 'worker_id': wid}
+    if data:
+        with open(filename, 'wb') as f:
+            f.write(data)
+    return {
+        'success': data is not None,
+        'time': time.time() - start,
+        'bytes': len(data) if data else 0,
+        'worker_id': wid
+    }
 
 def run_test(server, op, size_mb, workers, use_proc_pool=False):
     exec_class = ProcessPoolExecutor if use_proc_pool else ThreadPoolExecutor
