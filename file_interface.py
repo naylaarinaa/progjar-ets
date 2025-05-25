@@ -1,93 +1,67 @@
 import os
-import json
+import logging
 import base64
-import socket
-import threading
 from glob import glob
 
 class FileInterface:
+    def __init__(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.files_dir = os.path.normpath(os.path.join(base_dir, 'files'))
+        os.makedirs(self.files_dir, mode=0o755, exist_ok=True)
+        if not os.path.isdir(self.files_dir):
+            raise RuntimeError(f"Failed to access directory: {self.files_dir}")
+        self.original_dir = os.getcwd()
+        logging.info(f"File storage initialized at: {self.files_dir}")
 
-    def list(self, params=[]):
-        try:
-            filelist = glob('*.*')
-            return dict(status='OK', data=filelist)
-        except Exception as e:
-            return dict(status='ERROR', data=str(e))
-
-    def get(self,params=[]):
-        try:
-            filename = params[0]
-            if (filename == ''):
-                return None
-            fp = open(f"{filename}",'rb')
-            isifile = base64.b64encode(fp.read()).decode()
-            return dict(status='OK',data_namafile=filename,data_file=isifile)
-        except Exception as e:
-            return dict(status='ERROR',data=str(e))
+    def _chdir(self, to_files=True):
+        os.chdir(self.files_dir if to_files else self.original_dir)
 
     def upload(self, params=[]):
         try:
-            filename = params[0]
-            filedata = params[1]
+            self._chdir(True)
+            filename, filedata = params
             with open(filename, 'wb') as f:
                 f.write(base64.b64decode(filedata))
-            return dict(status='OK', data=f"File '{filename}' berhasil diupload.")
+            return {'status':'OK', 'data':f"{filename} uploaded successfully"}
         except Exception as e:
-            return dict(status='ERROR', data=str(e))
+            return {'status':'ERROR', 'data':str(e)}
+        finally:
+            self._chdir(False)
 
     def delete(self, params=[]):
         try:
-            filename = params[0]
-            os.remove(filename)
-            return dict(status='OK', data=f"File '{filename}' berhasil dihapus.")
+            self._chdir(True)
+            os.remove(params[0])
+            return {'status':'OK', 'data':f"{params[0]} deleted successfully"}
         except Exception as e:
-            return dict(status='ERROR', data=str(e))
+            return {'status':'ERROR', 'data':str(e)}
+        finally:
+            self._chdir(False)
 
+    def list(self, params=[]):
+        try:
+            self._chdir(True)
+            return {'status':'OK', 'data': glob('*.*')}
+        except Exception as e:
+            return {'status':'ERROR', 'data':str(e)}
+        finally:
+            self._chdir(False)
 
-def handle_client(conn, addr, interface):
-    print(f"Client connected: {addr}")
-    data = ""
-    while True:
-        d = conn.recv(1024)
-        if not d:
-            break
-        data += d.decode()
-        if "\r\n\r\n" in data:
-            break
-
-    try:
-        parts = data.strip().split(' ', 2)
-        command = parts[0].upper()
-        if command == 'LIST':
-            result = interface.list()
-        elif command == 'GET':
-            result = interface.get([parts[1]])
-        elif command == 'UPLOAD':
-            result = interface.upload([parts[1], parts[2]])
-        elif command == 'DELETE':
-            result = interface.delete([parts[1]])
-        else:
-            result = dict(status='ERROR', data='Unknown command')
-    except Exception as e:
-        result = dict(status='ERROR', data=str(e))
-
-    response = json.dumps(result) + "\r\n\r\n"
-    conn.sendall(response.encode())
-    conn.close()
-
-
-def run_server():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(('0.0.0.0', 6666))
-    server.listen(5)
-    print("Server listening on port 6666...")
-    interface = FileInterface()
-
-    while True:
-        conn, addr = server.accept()
-        client_thread = threading.Thread(target=handle_client, args=(conn, addr, interface))
-        client_thread.start()
-
+    def get(self, params=[]):
+        try:
+            self._chdir(True)
+            filename = params[0]
+            if not filename:
+                return None
+            with open(filename, 'rb') as f:
+                encoded = base64.b64encode(f.read()).decode()
+            return {'status':'OK', 'data_namafile': filename, 'data_file': encoded}
+        except Exception as e:
+            return {'status':'ERROR', 'data': str(e)}
+        finally:
+            self._chdir(False)
 
 if __name__ == '__main__':
-    run_server()
+    f = FileInterface()
+    print(f.list())
+    print(f.get(['pokijan.jpg']))

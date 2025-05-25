@@ -1,191 +1,224 @@
-import os
-import time
-import base64
-import socket
-import json
-import concurrent.futures
-import csv
+import socket, json, base64, time, os
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import subprocess
-import signal
+import csv
+from itertools import product
 
-SERVER_IP = '127.0.0.1'
-SERVER_PORT = 8888
-USE_MULTIPROCESSING = False  # Pastikan tetap False agar tidak makan RAM
+# --- FileClient dan fungsinya ---
+class FileClient:
+    def __init__(self, server_address='localhost:6666'):
+        host, port = server_address.split(':') if isinstance(server_address, str) else server_address
+        self.server_address = (host, int(port))
 
-def generate_dummy_file(filename, size_mb):
-    if os.path.exists(filename) and os.path.getsize(filename) == size_mb * 1024 * 1024:
-        return
-    print(f"Generating {filename} ({size_mb} MB)...")
+    def send_command(self, cmd=""):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.connect(self.server_address)
+                sock.sendall(cmd.encode())
+                data = b""
+                while True:
+                    chunk = sock.recv(8192)
+                    if not chunk: break
+                    data += chunk
+                    if b"\r\n\r\n" in data:
+                        break
+                return json.loads(data.decode())
+            except Exception as e:
+                return {"status": "ERROR", "data": str(e)}
+
+    def remote_list(self):
+        return self.send_command("LIST\r\n\r\n")
+
+    def remote_get(self, filename=""):
+        res = self.send_command(f"GET {filename}\r\n\r\n")
+        return base64.b64decode(res['data_file']) if res.get('status') == 'OK' else None
+
+    def remote_upload(self, filename="", file_data=None):
+        chunk_size = 10 * 1024 * 1024
+        encoded = ''.join(base64.b64encode(file_data[i:i+chunk_size]).decode() for i in range(0, len(file_data), chunk_size))
+        return self.send_command(f"UPLOAD {filename}\r\n{encoded}\r\n\r\n")
+
+def generate_test_file(filename, size_mb):
+    size_bytes = size_mb * 1024 * 1024
+    if os.path.exists(filename) and os.path.getsize(filename) == size_bytes:
+        return filename
     with open(filename, 'wb') as f:
-        f.write(os.urandom(size_mb * 1024 * 1024))
+        f.write(os.urandom(size_bytes))
+    return filename
 
-def send_command(command_str):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.connect((SERVER_IP, SERVER_PORT))
-        sock.sendall((command_str + "\r\n\r\n").encode())
-        data_received = ''
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data_received += chunk.decode()
-            if "\r\n\r\n" in data_received:
-                break
-        return json.loads(data_received.split("\r\n\r\n")[0])
-    except Exception as e:
-        return {'status': 'ERROR', 'data': str(e)}
-    finally:
-        sock.close()
-
-def client_upload(filename):
-    try:
-        with open(filename, 'rb') as f:
-            encoded = base64.b64encode(f.read()).decode()
-    except Exception as e:
-        return False, 0, 0, f"File read error: {e}"
-
+def upload_worker(client, size_mb, wid):
+    src_file = f"file{size_mb}mb.bin"    # ubah di sini
+    generate_test_file(src_file, size_mb)
+    with open(src_file, 'rb') as f:
+        data = f.read()
     start = time.time()
-    command = f"UPLOAD {os.path.basename(filename)} {encoded}"
-    result = send_command(command)
-    end = time.time()
+    res = client.remote_upload(f"testfile_{size_mb}mb.dat", data)
+    client.remote_list()
+    return {'success': res.get('status') == 'OK', 'time': time.time() - start, 'bytes': len(data), 'worker_id': wid}
 
-    duration = end - start
-    file_size = os.path.getsize(filename)
-    throughput = file_size / duration if duration > 0 else 0
-
-    if result.get('status') == 'OK':
-        return True, duration, throughput, 'Upload successful'
-    else:
-        return False, duration, 0, f"Upload failed: {result.get('data', 'Unknown error')}"
-
-def client_download(filename):
+def download_worker(client, size_mb, wid):
     start = time.time()
-    result = send_command(f"GET {os.path.basename(filename)}")
-    end = time.time()
+    data = client.remote_get(f"testfile_{size_mb}mb.dat")
+    return {'success': data is not None, 'time': time.time() - start, 'bytes': len(data) if data else 0, 'worker_id': wid}
 
-    duration = end - start
-    if result.get('status') == 'OK':
+def run_test(server, op, size_mb, workers, use_proc_pool=False):
+    exec_class = ProcessPoolExecutor if use_proc_pool else ThreadPoolExecutor
+    func = upload_worker if op == 'upload' else download_worker
+    client = FileClient(server)
+    with exec_class(max_workers=workers) as ex:
+        futures = [ex.submit(func, client, size_mb, i) for i in range(workers)]
+        results = [f.result() for f in as_completed(futures)]
+    success = sum(r['success'] for r in results)
+    fail = workers - success
+    total_bytes = sum(r['bytes'] for r in results if r['success'])
+    max_time = max(r['time'] for r in results)
+    throughput = total_bytes / max_time if max_time > 0 else 0
+    return {'operation': op, 'file_size_mb': size_mb, 'client_workers': workers, 'successful': success,
+            'failed': fail, 'total_time': max_time, 'throughput': throughput, 'total_bytes': total_bytes}
+
+# --- Fungsi server dan client testing gabungan ---
+def start_server(server_type, workers):
+    script = 'file_server_tp.py' if server_type == 'thread' else 'file_server_pp.py'
+    return subprocess.Popen(['python3', script, str(workers)])
+
+def run_client_test(operation, server_address, file_size, workers, use_process_pool):
+    cmd = [
+        'python3', __file__,
+        '--server', server_address,
+        '--operation', operation,
+        '--file-size', str(file_size),
+        '--workers', str(workers)
+    ]
+    if use_process_pool:
+        cmd.append('--use-process-pool')
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return json.loads(result.stdout) if result.returncode == 0 else None
+    except Exception as e:
+        print(f"Client test failed: {e}")
+        return None
+
+def get_last_completed_test_id(csv_filename):
+    if not os.path.exists(csv_filename):
+        return 0
+    with open(csv_filename, newline='') as csvfile:
         try:
-            data = base64.b64decode(result['data_file'])
-        except Exception as e:
-            return False, duration, 0, f"Decode error: {e}"
-        size = len(data)
-        throughput = size / duration if duration > 0 else 0
-        return True, duration, throughput, 'Download successful'
-    else:
-        return False, duration, 0, f"Download failed: {result.get('data', 'Unknown error')}"
-
-def run_client_workers(operation, filename, client_workers):
-    func = client_upload if operation == 'upload' else client_download
-    results = []
-    executor_cls = concurrent.futures.ProcessPoolExecutor if USE_MULTIPROCESSING else concurrent.futures.ThreadPoolExecutor
-    with executor_cls(max_workers=client_workers) as executor:
-        futures = []
-        for _ in range(client_workers):
-            futures.append(executor.submit(func, filename))
-            time.sleep(0.01)  # Tambahkan delay agar tidak overload
-        for i, f in enumerate(concurrent.futures.as_completed(futures), 1):
-            sukses, durasi, tp, info = f.result()
-            results.append((sukses, durasi, tp, info))
-            status_str = 'SUKSES' if sukses else 'GAGAL'
-            print(f"  Worker #{i}: {status_str}, Durasi: {durasi:.3f}s, Throughput: {int(tp)} B/s, Info: {info}")
-    return results
+            last = 0
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                try:
+                    test_id = int(row['Nomor'])
+                    if test_id > last:
+                        last = test_id
+                except:
+                    continue
+            return last
+        except:
+            return 0
 
 def main():
-    operasi_list = ['upload', 'download']
-    volume_list = [10, 50, 100]
-    client_worker_pool_list = [1, 5, 50]
-    server_worker_pool_list = [1, 5, 50]
+    import argparse
+    parser = argparse.ArgumentParser(description='File Server Stress Test')
+    parser.add_argument('--server', default='localhost:6666')
+    parser.add_argument('--operation', choices=['upload', 'download'])
+    parser.add_argument('--file-size', type=int, choices=[10, 50, 100])
+    parser.add_argument('--workers', type=int, choices=[1, 5, 50])
+    parser.add_argument('--use-process-pool', action='store_true')
+    args = parser.parse_args()
 
-    os.makedirs('test_files', exist_ok=True)
-    for volume in volume_list:
-        generate_dummy_file(f'test_files/file_{volume}mb.bin', volume)
+    csv_filename = 'stress_test_results.csv'
 
-    # Baca hasil sebelumnya kalau ada
-    seen_tests = set()
-    nomor = 1
-    if os.path.exists('stress_test_results.csv'):
-        with open('stress_test_results.csv', 'r') as f_csv:
-            reader = csv.DictReader(f_csv)
-            for row in reader:
-                key = (
-                    row['Operasi'],
-                    int(row['Volume(MB)']),
-                    int(row['Client Worker Pool']),
-                    int(row['Server Worker Pool'])
-                )
-                seen_tests.add(key)
-                nomor = max(nomor, int(row['Nomor']) + 1)
+    if args.operation and args.file_size and args.workers:
+        result = run_test(args.server, args.operation, args.file_size, args.workers, args.use_process_pool)
+        print(json.dumps(result, indent=2))
+        return
 
-    header = [
-        "Nomor", "Operasi", "Volume(MB)", "Client Worker Pool",
-        "Server Worker Pool", "Waktu Total/Client(s)",
-        "Throughput/Client(Bytes/s)",
-        "Client Worker Sukses", "Client Worker Gagal",
-        "Server Worker Sukses", "Server Worker Gagal"
-    ]
+    test_matrix = [(op, size, cw) for op in ['upload', 'download'] for size in [10, 50, 100] for cw in [1, 5, 50]]
+    server_types = ['thread', 'process']
+    server_workers = [1, 5, 50]
 
-    with open('stress_test_results.csv', 'a', newline='') as f_csv:
-        writer = csv.writer(f_csv)
-        if os.stat('stress_test_results.csv').st_size == 0:
-            writer.writerow(header)
+    last_completed_id = get_last_completed_test_id(csv_filename)
 
-        for server_workers in server_worker_pool_list:
-            print(f"\n=== Testing dengan Server Workers = {server_workers} ===")
+    file_exists = os.path.exists(csv_filename)
+    with open(csv_filename, 'a', newline='') as csvfile:
+        fieldnames = ['Nomor','Operasi','Volume','Jumlah client worker pool','Jumlah server worker pool',
+                      'Waktu total per client','Throughput per client',
+                      'Jumlah worker client sukses','Jumlah worker client gagal',
+                      'Tipe server','Status server']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
 
-            server_process = subprocess.Popen(
-                ['python3', 'file_server.py', '--workers', str(server_workers)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+        test_id = 1
+        for operation, file_size, c_workers in test_matrix:
+            for s_type, s_workers in product(server_types, server_workers):
+                if test_id <= last_completed_id:
+                    print(f"Skipping test {test_id} (already completed)")
+                    test_id += 1
+                    continue
 
-            time.sleep(1.5)
+                print("\n" + "="*60)
+                print(f"Running Test #{test_id}")
+                print(f"Operation           : {operation.capitalize()}")
+                print(f"File Size           : {file_size} MB")
+                print(f"Client Workers      : {c_workers}")
+                print(f"Server Type         : {s_type.capitalize()} Server")
+                print(f"Server Worker Count : {s_workers}")
+                print("="*60)
 
-            try:
-                for operasi in operasi_list:
-                    for volume in volume_list:
-                        filename = f'test_files/file_{volume}mb.bin'
-                        for client_workers in client_worker_pool_list:
-                            key = (operasi, volume, client_workers, server_workers)
-                            if key in seen_tests:
-                                print(f"✅ Skipping test sudah ada: {key}")
-                                continue
-                            if client_workers >50 and volume > 100:
-                                print(f"⚠️  Skipping berat: Volume={volume}MB, Clients={client_workers}")
-                                continue
-
-                            print(f"\nTest #{nomor}: Operasi={operasi.upper()}, Volume={volume}MB, Client Workers={client_workers}, Server Workers={server_workers}")
-                            results = run_client_workers(operasi, filename, client_workers)
-
-                            sukses = sum(1 for r in results if r[0])
-                            gagal = client_workers - sukses
-                            avg_time = (sum(r[1] for r in results if r[0]) / sukses) if sukses else 0
-                            avg_tp = (sum(r[2] for r in results if r[0]) / sukses) if sukses else 0
-
-                            row = [
-                                nomor,
-                                operasi,
-                                volume,
-                                client_workers,
-                                server_workers,
-                                round(avg_time, 3),
-                                int(avg_tp),
-                                sukses,
-                                gagal,
-                                sukses,  # Dummy data, bisa diganti jika ada log server
-                                gagal
-                            ]
-
-                            writer.writerow(row)
-                            f_csv.flush()
-                            nomor += 1
-            finally:
-                server_process.send_signal(signal.SIGINT)
-                server_process.wait()
+                subprocess.run(['pkill', '-f', 'file_server'], stderr=subprocess.DEVNULL)
                 time.sleep(1)
+                server_proc = start_server(s_type, s_workers)
+                time.sleep(2)
 
-    print("\nStress test selesai, hasil sudah ditambahkan ke stress_test_results.csv")
+                try:
+                    result = run_client_test(operation, 'localhost:6666', file_size, c_workers, False)
+                    if not result:
+                        writer.writerow({
+                            'Nomor': test_id,
+                            'Operasi': operation,
+                            'Volume': file_size,
+                            'Jumlah client worker pool': c_workers,
+                            'Jumlah server worker pool': s_workers,
+                            'Jumlah worker client sukses': 0,
+                            'Jumlah worker client gagal': c_workers,
+                            'Tipe server': s_type,
+                            'Status server': 'crash',
+                            'Waktu total per client': '',
+                            'Throughput per client': ''
+                        })
+                        csvfile.flush()
+                        print("Result: Test failed or no response from client.")
+                        test_id += 1
+                        continue
+
+                    server_status = 'sukses' if server_proc.poll() is None else 'crash'
+
+                    writer.writerow({
+                        'Nomor': test_id,
+                        'Operasi': operation,
+                        'Volume': file_size,
+                        'Jumlah client worker pool': c_workers,
+                        'Jumlah server worker pool': s_workers,
+                        'Waktu total per client': result['total_time'],
+                        'Throughput per client': result['throughput'],
+                        'Jumlah worker client sukses': result['successful'],
+                        'Jumlah worker client gagal': result['failed'],
+                        'Tipe server': s_type,
+                        'Status server': server_status,
+                    })
+                    csvfile.flush()
+
+                    print(f"Result: Client Success={result['successful']} | Client Fail={result['failed']} | Server Status={server_status}")
+                    print(f"Total Time          : {result['total_time']:.3f} sec")
+                    print(f"Throughput          : {result['throughput'] / (1024*1024):.3f} MB/s")
+
+                    test_id += 1
+                finally:
+                    server_proc.terminate()
+                    server_proc.wait()
+                    time.sleep(1)
 
 if __name__ == '__main__':
     main()
