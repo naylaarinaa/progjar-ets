@@ -9,7 +9,7 @@ import subprocess
 import signal
 
 SERVER_IP = '127.0.0.1'
-SERVER_PORT = 6666
+SERVER_PORT = 8888
 USE_MULTIPROCESSING = False  # Pastikan tetap False agar tidak makan RAM
 
 def generate_dummy_file(filename, size_mb):
@@ -139,6 +139,7 @@ def main():
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
+
             time.sleep(1.5)
 
             try:
@@ -150,7 +151,7 @@ def main():
                             if key in seen_tests:
                                 print(f"✅ Skipping test sudah ada: {key}")
                                 continue
-                            if client_workers >= 50 and volume >= 100:
+                            if client_workers >50 and volume > 100:
                                 print(f"⚠️  Skipping berat: Volume={volume}MB, Clients={client_workers}")
                                 continue
 

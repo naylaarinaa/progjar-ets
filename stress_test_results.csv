@@ -10,3 +10,5 @@ Nomor,Operasi,Volume(MB),Client Worker Pool,Server Worker Pool,Waktu Total/Clien
 9,download,10,1,1,13.349,785498,1,0,1,0
 10,download,10,5,1,38.676,370785,5,0,5,0
 11,download,10,50,1,316.433,74756,50,0,50,0
+12,upload,1,1,1,0.164,6392063,1,0,1,0
+13,upload,1,5,1,0.511,2344288,5,0,5,0
