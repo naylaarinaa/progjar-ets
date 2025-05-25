@@ -138,12 +138,19 @@ def main():
 
     csv_filename = 'stress_test_results.csv'
 
+    # Jika dijalankan dengan parameter langsung (bukan batch)
     if args.operation and args.file_size and args.workers:
         result = run_test(args.server, args.operation, args.file_size, args.workers, args.use_process_pool)
         print(json.dumps(result, indent=2))
         return
 
-    test_matrix = [(op, size, cw) for op in ['upload', 'download'] for size in [10, 50, 100] for cw in [1, 5, 50]]
+    # Urutan pengujian: per volume → upload semua → download semua
+    test_matrix = []
+    for size in [10, 50, 100]:
+        for op in ['upload', 'download']:
+            for cw in [1, 5, 50]:
+                test_matrix.append((op, size, cw))
+
     server_types = ['thread', 'process']
     server_workers = [1, 5, 50]
 
@@ -176,8 +183,11 @@ def main():
                 print(f"Server Worker Count : {s_workers}")
                 print("="*60)
 
+                # Kill server sebelumnya
                 subprocess.run(['pkill', '-f', 'file_server'], stderr=subprocess.DEVNULL)
                 time.sleep(1)
+
+                # Start server baru
                 server_proc = start_server(s_type, s_workers)
                 time.sleep(2)
 
