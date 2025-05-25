@@ -53,14 +53,14 @@ def upload_worker(client, size_mb, wid):
     with open(src_file, 'rb') as f:
         data = f.read()
     start = time.time()
-    res = client.remote_upload(f"testfile_{size_mb}mb.dat", data)
+    res = client.remote_upload(f"file{size_mb}mb.bin", data)
     client.remote_list()
     return {'success': res.get('status') == 'OK', 'time': time.time() - start, 'bytes': len(data), 'worker_id': wid}
 
 def download_worker(client, size_mb, wid):
     filename = f"file{size_mb}mb.bin"
     start = time.time()
-    data = client.remote_get(f"testfile_{size_mb}mb.dat")
+    data = client.remote_get(f"file{size_mb}mb.bin")
     if data:
         with open(filename, 'wb') as f:
             f.write(data)
